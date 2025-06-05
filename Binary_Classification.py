@@ -15,8 +15,6 @@ print(X)
 Y = torch.cat([torch.zeros(n_sample//2,1), torch.ones(n_sample//2,1)])
 #print(Y)
 
-print(X[:,1].shape)
-print(Y.shape)
 ratio = int(0.9*n_sample)
 
 X_train = X[:ratio]
