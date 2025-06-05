@@ -22,10 +22,11 @@ y = true_w * X + true_b + torch.randn_like(X)  # Add noise
 class LinearRegression(nn.Module):
     def __init__(self):
         super().__init__()
-        self.linear_layer = nn.Linear(in_features=1,out_features=1)
+        self.weights = nn.Parameter(torch.randn(1, requires_grad=True, dtype=torch.float))
+        self.bias = nn.Parameter(torch.randn(1, requires_grad=True, dtype = torch.float))
 
     def forward(self, x:torch.Tensor) -> torch.Tensor:
-        return self.linear_layer(x)
+        return self.weights * x + self.bias
     
 
 # Define a custom dataset
@@ -59,10 +60,13 @@ X_test,y_test = data
 model_1 = LinearRegression()
 model_1.to(device)
 
-loss_fn = nn.L1Loss()
-optimizer = torch.optim.SGD(params=model_1.parameters(), lr = 0.01)
+def loss_fn(y_hat, y):
+    l = (y_hat - y).abs()
+    return l.mean()
 
-epochs = 200
+optimizer = torch.optim.SGD(params=model_1.parameters(), lr = 0.09)
+
+epochs = 500
 epoch_count = []
 loss_val = []
 test_val = []
@@ -76,12 +80,12 @@ for epoch in range(epochs):
     for X_train, y_train in train_loader:
         X_train, y_train = X_train.to(device), y_train.to(device)
         y_pred = model_1(X_train)
-        loss = loss_fn(y_pred, y_train)
+        loss = loss_fn(y_hat = y_pred, y = y_train)
 
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
-
+        print(model_1.bias)
         train_loss += loss.item()
 
     train_loss /= len(train_loader)
@@ -102,7 +106,7 @@ for epoch in range(epochs):
         test_val.append(test_loss)
         print(f"Epoch {epoch}: Train Loss = {train_loss:.4f}, Test Loss = {test_loss:.4f}")
 
-
+print("Params:", model_1.state_dict())
 #plotting predictions
 def plot_predictions(train_data=X_train,
                      train_labels=y_train,
@@ -118,7 +122,7 @@ def plot_predictions(train_data=X_train,
   plt.show()
 
 
-#plot_predictions(predictions=y_pred.detach().numpy())
+plot_predictions(predictions=y_pred.detach().numpy())
 
 # Plot the loss curves
 plt.plot(epoch_count, np.array(torch.tensor(loss_val).numpy()), label="Train loss")
