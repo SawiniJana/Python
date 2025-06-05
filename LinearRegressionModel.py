@@ -85,7 +85,7 @@ for epoch in range(epochs):
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
-        print(model_1.bias)
+        #print(model_1.bias)
         train_loss += loss.item()
 
     train_loss /= len(train_loader)
