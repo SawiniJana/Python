@@ -1,14 +1,9 @@
-import os
-import time
 import random
 import numpy as np
 
-from scipy.stats import ortho_group
-
-import torchvision
 from torchvision import datasets
 import torchvision.transforms as transforms
-import torch_geometric.transforms
+
  
 from torch_geometric.utils import to_networkx
 
@@ -17,179 +12,133 @@ import torch.nn as nn
 import torch.utils.data as data
 import torch.nn.functional as F
 from torch.nn import Parameter, Linear, ReLU, BatchNorm1d, Module, Sequential
-from torch import Tensor
+
 from torch_scatter import scatter
-from torch_cluster import knn
 
-
-torch.set_default_dtype(torch.float32)
-
-from torch_geometric.typing import (
-    Adj,
-    OptPairTensor,
-    OptTensor,
-    Size,
-    SparseTensor,
-    torch_sparse,
-)
-
-import networkx as nx
 import torch_geometric
-from torch_geometric.data import Data
-from torch_geometric.data import Batch
-import torch_geometric.transforms as T
-from torch_geometric.utils import degree, add_self_loops, remove_self_loops, to_dense_adj, dense_to_sparse, to_undirected, from_networkx, to_networkx
+
+from torch_geometric.utils import degree, add_self_loops
 from torch_geometric.loader import DataLoader
-from torch_geometric.nn import MessagePassing, global_mean_pool, knn_graph
+from torch_geometric.nn import MessagePassing, global_mean_pool
 from torch_geometric.datasets import QM9
 
 
 import matplotlib.pyplot as plt
 
-from IPython.display import HTML
-
-
-
-print("PyTorch version {}".format(torch.__version__))
-print("PyG version {}".format(torch_geometric.__version__))
-
-Batch_size = 32
-
 dataset = QM9(root='data/QM9')
 trainload = DataLoader(dataset[:10000], batch_size=32, shuffle=True)
 testload = DataLoader(dataset[10000:], batch_size=32, shuffle=False)
 
-class GCNConv(MessagePassing):
-    def __init__(self, in_channels, out_channels):
-        super().__init__(aggr="add")
-        self.lin = Linear(in_channels, out_channels, bias=False)
-        self.bias = Parameter(torch.empty(out_channels)) 
-
-        self.reset_parameters()
-    
-    def reset_parameters(self):
-        self.lin.reset_parameters()
-        self.bias.data.zero_()
-    
-    def forward(self, x , edge_index):
-        edge_index, _ = add_self_loops(edge_index, num_nodes =x.size(0) )
-        x = self.lin(x)
-        row,col = edge_index
-        deg = degree(col, x.size(0), dtype = x.dtype)
-        deg_inv_sqrt = deg.pow(-0.5)
-        deg_inv_sqrt[deg_inv_sqrt == float("int")] = 0
-        norm = deg_inv_sqrt[row] * deg_inv_sqrt[col]
-
-        out = self.propagate(edge_index, x=x, norm=norm)
-        out += self.bias
-
-        return out
-        
-    
-    def messgae(self, x_j, norm):
-        return norm.view(-1,1) * x_j
-    
+ 
 class MPNNLayer(MessagePassing):
-    def __init__(self, emb_dim=64, edge_dim=4, aggr="add"):
+    def __init__(self, emb_dim , hidden_layers , edge_dim, aggr='add'):
         super().__init__(aggr=aggr)
 
         self.emb_dim = emb_dim
         self.edge_dim = edge_dim
 
-        self.mlp_upd = Sequential(
-            Linear(3*emb_dim + edge_dim, emb_dim), BatchNorm1d(emb_dim), ReLU(),
-            Linear(emb_dim, emb_dim), BatchNorm1d(emb_dim), ReLU()
+        self.mlp_msg = nn.Sequential(
+            Linear(2 * emb_dim + edge_dim, hidden_layers),nn.ReLU(), nn.BatchNorm1d(hidden_layers), 
+            Linear(hidden_layers, emb_dim), nn.ReLU(), nn.BatchNorm1d(emb_dim)
         )
 
-        self.mlp_upd = Sequential(
-            Linear(3*emb_dim + edge_dim, emb_dim), BatchNorm1d(emb_dim), ReLU(),
-            Linear(emb_dim, emb_dim), BatchNorm1d(emb_dim), ReLU()
+        self.upd_msg = nn.Sequential(
+            Linear(emb_dim * 2, hidden_layers), nn.BatchNorm1d(hidden_layers), nn.ReLU(),
+            Linear(hidden_layers, emb_dim), nn.ReLU(), nn.BatchNorm1d(emb_dim)
         )
 
-    def forward(self, h, edge_index, edge_attr):
-        out = self.propagate(edge_index= edge_index, h=h, edge_attr=edge_attr)
-        return out
-        
-    def message(self, h_i, h_j, edge_attr):    
-        msg = torch.cat([h_i, h_j, edge_attr], dim=-1)
-        return msg
-    
+    def forward(self, x, edge_index, edge_attr):
+        self.x = x  
+        return self.propagate(edge_index=edge_index, x=x, edge_attr=edge_attr)
+
+    def message(self, x_i, x_j, edge_attr):
+        msg_input = torch.cat([x_i, x_j, edge_attr], dim=1)
+        return self.mlp_msg(msg_input)
+
     def aggregate(self, inputs, index):
-        out = scatter(inputs, index, dim=0, reduce=self.aggr)
-        return out
-    
-    def update(self, aggr_out, h ):
-        upd_out = torch.cat([h, aggr_out], dim=-1)
-        return self.mlp_upd(upd_out)
-    
-class MPNNModel(Module):
-    def __init__(self, num_layers=4, emb_dim=64, in_dim=11, edge_dim=4, out_dim=1):
+        return scatter(inputs, index, dim=0, reduce=self.aggr)
 
-        super(MPNNModel, self).__init__()
-        
-        # Linear projection for initial node features
-        self.lin_in = Linear(in_dim, emb_dim)
-        
-        # Stack of MPNN layers
-        self.convs = torch.nn.ModuleList()
+    def update(self, aggr_out, x):
+        upd_input = torch.cat([x, aggr_out], dim=1)
+        #print(upd_input.shape)
+        return self.upd_msg(upd_input)
+
+
+class MPNNModel(nn.Module):
+    def __init__(self, in_dim, edge_dim, hidden_dim=64, num_layers=3):
+        super().__init__()
+
+        #1.
+        self.lin_in = Linear(in_dim, hidden_dim)
+        #2. layers of calling
+        self.convs = nn.ModuleList()
         for layer in range(num_layers):
-            self.convs.append(MPNNLayer(emb_dim, edge_dim, aggr='add'))
-        
-        # Global pooling/readout function `R` (mean pooling)
-        # PyG handles the underlying logic via `global_mean_pool()`
+            self.convs.append(MPNNLayer(emb_dim = hidden_dim,hidden_layers =32, edge_dim = edge_dim))
+        #3.Pooling
         self.pool = global_mean_pool
-        self.lin_pred = Linear(emb_dim, out_dim)
-        
+        #4. Linear
+        self.lin_layer = nn.Linear(in_features=hidden_dim,
+                                   out_features= 1)
+
+    
     def forward(self, data):
-        h = self.lin_in(data.x) # (n, d_n) -> (n, d)
-        
+        x, edge_index, edge_attr, batch = data.x, data.edge_index, data.edge_attr, data.batch
+        x =self.lin_in(data.x)
+
         for conv in self.convs:
-            h = h + conv(h = h, edge_index = data.edge_index, edge_attr = data.edge_attr) # (n, d) -> (n, d)
-            # Note that we add a residual connection after each MPNN layer
+            x += conv(x, edge_index, edge_attr)
 
- 
-        h_graph = self.pool(h, data.batch) # (n, d) -> (batch_size, d)
-        out = self.lin_pred(h_graph) # (batch_size, d) -> (batch_size, 1)
-        return out.view(-1)
+        #print(x)
+        x = self.pool(x, batch)
 
+        #print(self.lin_layer(x).shape)
+        return self.lin_layer(x)
 
 model_1 = MPNNModel(in_dim=dataset.num_node_features, edge_dim=dataset.num_edge_features)
-model_2 = GCNConv(in_channels=dataset.num_node_features, out_channels=64)
 
-optimizer = torch.optim.Adam(model_1.parameters(), lr = 0.0001)
+optimizer = torch.optim.Adam(model_1.parameters(), lr = 0.01, weight_decay=5e-4)
 loss = nn.MSELoss()
 
-def train(model_1, trainload):
+def train(train_loader, model, optimizer, loss_fn):
     model_1.train()
-    total_loss = 0
-    for data in trainload:
-        optimizer.zero_grad()
-        out  =model_1(data)
-        train_loss = loss(out, data.y[:,0])
-        train_loss.backward()
-        optimizer.step()
-        total_loss += train_loss.item() * data.num_graphs
+    train_loss = 0
     
-    return total_loss/len(trainload.dataset)
+    for data in train_loader:
+        #print(f"LENTH OF X: {len(data.x)}")
+        y_pred = model(data)
+        #print(f" Prediction: {y_pred.squeeze().shape}| Truth: {data.y.shape}")
+        loss = loss_fn(y_pred.squeeze(), data.y[:,4])
+        train_loss += loss.item()
 
-def test(model_1, testload):
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+    
+    train_loss /= len(train_loader)
+    
+    return train_loss
+
+def test(test_loader, model, loss_fn):
     model_1.eval()
     test_loss = 0
-    for data in testload:
-        
-        out  =model_1(data)
-        test_loss = loss(out, data.y[:,0])
-        test_loss += test_loss.item() * data.num_graphs
-    
-    return test_loss/len(testload.dataset)
+    with torch.inference_mode():
+        for data in test_loader:
+            test_pred = model(data)
+            #print(test_pred)
+            loss = loss_fn(test_pred.squeeze(), data.y[:,4])
+            test_loss += loss.item()
+
+        test_loss /= len(test_loader)
+
+    return test_loss
 
 ep = []
 result1 = []
 result2 = []
 
-for epoch in range (0, 25):
-    train_loss = train(model_1,trainload)
-    test_loss = test(model_1, testload)
+for epoch in range (5):
+    train_loss = train(trainload, model_1, optimizer, loss)
+    test_loss = test( testload,model_1, loss)
     ep.append(epoch)
     result1.append(np.array(torch.tensor(train_loss).numpy()))
     result2.append(np.array(torch.tensor(test_loss).numpy()))
